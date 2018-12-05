@@ -53,6 +53,9 @@ http_client:
   max_idle_connections: 500
   max_idle_connections_per_host: 20
   idle_connection_timeout_seconds: 30
+rates_converter:
+  fetch_url: http://currency.prebid.org
+  fetch_interval_seconds: 1800
 recaptcha_secret: asdfasdfasdfasdf
 metrics:
   influxdb:
@@ -136,6 +139,8 @@ func TestFullConfig(t *testing.T) {
 	cmpInts(t, "http_client.idle_connection_timeout_seconds", cfg.Client.IdleConnTimeout, 30)
 	cmpInts(t, "gdpr.host_vendor_id", cfg.GDPR.HostVendorID, 15)
 	cmpBools(t, "gdpr.usersync_if_ambiguous", cfg.GDPR.UsersyncIfAmbiguous, true)
+	cmpStrings(t, "rates_converter.fetch_url", cfg.RatesConverter.FetchURL, "http://currency.prebid.org")
+	cmpInts(t, "rates_converter.fetch_interval_seconds", cfg.RatesConverter.FetchIntervalSeconds, 1800)
 	cmpStrings(t, "recaptcha_secret", cfg.RecaptchaSecret, "asdfasdfasdfasdf")
 	cmpStrings(t, "metrics.influxdb.host", cfg.Metrics.Influxdb.Host, "upstream:8232")
 	cmpStrings(t, "metrics.influxdb.database", cfg.Metrics.Influxdb.Database, "metricsdb")
@@ -209,6 +214,30 @@ func TestOverflowedVendorID(t *testing.T) {
 
 	if err := cfg.validate(); err == nil {
 		t.Errorf("cfg.gdpr.host_vendor_id should prevent values over %d, but it doesn't", 0xffff)
+	}
+}
+
+func TestNegativeRatesConverterFetchInterval(t *testing.T) {
+	cfg := Configuration{
+		RatesConverter: RatesConverter{
+			FetchIntervalSeconds: -1,
+		},
+	}
+
+	if err := cfg.validate(); err == nil {
+		t.Error("cfg.rates_converter.fetch_interval_seconds should prevent negative values, but it doesn't")
+	}
+}
+
+func TestOverflowedRatesConverterFetchInterval(t *testing.T) {
+	cfg := Configuration{
+		RatesConverter: RatesConverter{
+			FetchIntervalSeconds: (0xffff) + 1,
+		},
+	}
+
+	if err := cfg.validate(); err == nil {
+		t.Errorf("cfg.rates_converter.fetch_interval_seconds prevent values over %d, but it doesn't", 0xffff)
 	}
 }
 

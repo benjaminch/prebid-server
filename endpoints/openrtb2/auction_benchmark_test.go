@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/prebid/prebid-server/adapters"
+	"github.com/prebid/prebid-server/currencies"
 
 	analyticsConf "github.com/prebid/prebid-server/analytics/config"
 	"github.com/prebid/prebid-server/config"
@@ -67,7 +68,24 @@ func BenchmarkOpenrtbEndpoint(b *testing.B) {
 	if err != nil {
 		return
 	}
-	endpoint, _ := NewEndpoint(exchange.NewExchange(server.Client(), nil, &config.Configuration{}, theMetrics, infos, gdpr.AlwaysAllow{}), paramValidator, empty_fetcher.EmptyFetcher{}, &config.Configuration{MaxRequestSize: maxSize}, theMetrics, analyticsConf.NewPBSAnalytics(&config.Analytics{}), map[string]string{}, []byte{})
+	endpoint, _ := NewEndpoint(
+		exchange.NewExchange(
+			server.Client(),
+			nil,
+			&config.Configuration{},
+			theMetrics,
+			infos,
+			gdpr.AlwaysAllow{},
+		),
+		paramValidator,
+		empty_fetcher.EmptyFetcher{},
+		&config.Configuration{MaxRequestSize: maxSize},
+		theMetrics,
+		analyticsConf.NewPBSAnalytics(&config.Analytics{}),
+		currencies.NewRateConverterDefault(),
+		map[string]string{},
+		[]byte{},
+	)
 
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {

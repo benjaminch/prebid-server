@@ -10,6 +10,7 @@ import (
 
 	"github.com/mxmCherry/openrtb"
 	"github.com/prebid/prebid-server/adapters"
+	"github.com/prebid/prebid-server/currencies"
 	"github.com/prebid/prebid-server/errortypes"
 	"github.com/prebid/prebid-server/openrtb_ext"
 	"golang.org/x/net/context/ctxhttp"
@@ -37,7 +38,7 @@ type adaptedBidder interface {
 	//
 	// Any errors will be user-facing in the API.
 	// Error messages should help publishers understand what might account for "bad" bids.
-	requestBid(ctx context.Context, request *openrtb.BidRequest, name openrtb_ext.BidderName, bidAdjustment float64) (*pbsOrtbSeatBid, []error)
+	requestBid(ctx context.Context, request *openrtb.BidRequest, name openrtb_ext.BidderName, bidAdjustment float64, rateConverter *currencies.RateConverter) (*pbsOrtbSeatBid, []error)
 }
 
 // pbsOrtbBid is a Bid returned by an adaptedBidder.
@@ -85,7 +86,7 @@ type bidderAdapter struct {
 	Client *http.Client
 }
 
-func (bidder *bidderAdapter) requestBid(ctx context.Context, request *openrtb.BidRequest, name openrtb_ext.BidderName, bidAdjustment float64) (*pbsOrtbSeatBid, []error) {
+func (bidder *bidderAdapter) requestBid(ctx context.Context, request *openrtb.BidRequest, name openrtb_ext.BidderName, bidAdjustment float64, rateConverter *currencies.RateConverter) (*pbsOrtbSeatBid, []error) {
 	reqData, errs := bidder.Bidder.MakeRequests(request)
 
 	if len(reqData) == 0 {
@@ -109,13 +110,12 @@ func (bidder *bidderAdapter) requestBid(ctx context.Context, request *openrtb.Bi
 		}
 	}
 
+	defaultCurrency := "USD"
 	seatBid := &pbsOrtbSeatBid{
 		bids:      make([]*pbsOrtbBid, 0, len(reqData)),
-		currency:  "USD",
+		currency:  defaultCurrency,
 		httpCalls: make([]*openrtb_ext.ExtHttpCall, 0, len(reqData)),
 	}
-
-	firstHTTPCallCurrency := ""
 
 	// If the bidder made multiple requests, we still want them to enter as many bids as possible...
 	// even if the timeout occurs sometime halfway through.
@@ -134,36 +134,30 @@ func (bidder *bidderAdapter) requestBid(ctx context.Context, request *openrtb.Bi
 			if bidResponse != nil {
 
 				if bidResponse.Currency == "" {
-					bidResponse.Currency = "USD"
+					// Empty currency means default currency `USD`
+					bidResponse.Currency = defaultCurrency
 				}
 
-				// Related to #281 - currency support
-				// Prebid can't make sure that each HTTP call returns bids with the same currency as the others.
-				// If a Bidder makes two HTTP calls, and their servers respond with different currencies,
-				// we will consider the first call currency as standard currency and then reject others which contradict it.
-				if firstHTTPCallCurrency == "" { // First HTTP call
-					firstHTTPCallCurrency = bidResponse.Currency
+				// Try to get a conversion rate
+				conversionRate, conversionRateFound, err := bidder.tryGetConversionRate(
+					rateConverter,
+					bidResponse.Currency,
+					defaultCurrency,
+				)
+				if err != nil {
+					errs = append(errs, err)
 				}
 
-				// TODO: #281 - Once currencies rate conversion is out, this shouldn't be an issue anymore, we will only
-				// need to convert the bid price based on the currency.
-				if firstHTTPCallCurrency == bidResponse.Currency {
+				if conversionRateFound == true {
 					for i := 0; i < len(bidResponse.Bids); i++ {
 						if bidResponse.Bids[i].Bid != nil {
-							// TODO #280: Convert the bid price
-							bidResponse.Bids[i].Bid.Price = bidResponse.Bids[i].Bid.Price * bidAdjustment
+							bidResponse.Bids[i].Bid.Price = bidResponse.Bids[i].Bid.Price * bidAdjustment * conversionRate
 						}
 						seatBid.bids = append(seatBid.bids, &pbsOrtbBid{
 							bid:     bidResponse.Bids[i].Bid,
 							bidType: bidResponse.Bids[i].BidType,
 						})
 					}
-				} else {
-					errs = append(errs, fmt.Errorf(
-						"Bid currencies mistmatch found. Expected all bids to have the same currencies. Expected '%s', was: '%s'",
-						firstHTTPCallCurrency,
-						bidResponse.Currency,
-					))
 				}
 			}
 		} else {
@@ -172,6 +166,36 @@ func (bidder *bidderAdapter) requestBid(ctx context.Context, request *openrtb.Bi
 	}
 
 	return seatBid, errs
+}
+
+// tryGetConversionRate returns a conversion rate between two currencies if found in the rate converter.
+// If not, returns an error and rate to 1.
+func (bidder *bidderAdapter) tryGetConversionRate(rateConverter *currencies.RateConverter, fromCur string, toCur string) (float64, bool, error) {
+	var defaultRate = 1.0
+
+	if fromCur == toCur {
+		return defaultRate, true, nil
+	}
+
+	if rateConverter != nil && rateConverter.IsActive() {
+		if rates := rateConverter.Rates(); rates != nil {
+			if r, err := rates.GetRate(fromCur, toCur); err == nil {
+				return r, true, nil
+			}
+
+			return defaultRate, false, fmt.Errorf(
+				"Currency conversion rate not found: '%s' => '%s'",
+				fromCur,
+				toCur,
+			)
+		}
+	}
+
+	return defaultRate, false, fmt.Errorf(
+		"Rates converter not set or inactive, cannot convert rates: '%s' => '%s'",
+		fromCur,
+		toCur,
+	)
 }
 
 // makeExt transforms information about the HTTP call into the contract class for the PBS response.

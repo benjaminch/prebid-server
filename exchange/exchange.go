@@ -16,6 +16,7 @@ import (
 
 	"github.com/prebid/prebid-server/adapters"
 	"github.com/prebid/prebid-server/config"
+	"github.com/prebid/prebid-server/currencies"
 	"github.com/prebid/prebid-server/errortypes"
 	"github.com/prebid/prebid-server/gdpr"
 	"github.com/prebid/prebid-server/openrtb_ext"
@@ -26,7 +27,7 @@ import (
 // Exchange runs Auctions. Implementations must be threadsafe, and will be shared across many goroutines.
 type Exchange interface {
 	// HoldAuction executes an OpenRTB v2.5 Auction.
-	HoldAuction(ctx context.Context, bidRequest *openrtb.BidRequest, usersyncs IdFetcher, labels pbsmetrics.Labels) (*openrtb.BidResponse, error)
+	HoldAuction(ctx context.Context, bidRequest *openrtb.BidRequest, usersyncs IdFetcher, labels pbsmetrics.Labels, rateConverter *currencies.RateConverter) (*openrtb.BidResponse, error)
 }
 
 // IdFetcher can find the user's ID for a specific Bidder.
@@ -70,7 +71,7 @@ func NewExchange(client *http.Client, cache prebid_cache_client.Client, cfg *con
 	return e
 }
 
-func (e *exchange) HoldAuction(ctx context.Context, bidRequest *openrtb.BidRequest, usersyncs IdFetcher, labels pbsmetrics.Labels) (*openrtb.BidResponse, error) {
+func (e *exchange) HoldAuction(ctx context.Context, bidRequest *openrtb.BidRequest, usersyncs IdFetcher, labels pbsmetrics.Labels, rateConverter *currencies.RateConverter) (*openrtb.BidResponse, error) {
 	// Snapshot of resolved bid request for debug if test request
 	var resolvedRequest json.RawMessage
 	if bidRequest.Test == 1 {
@@ -131,7 +132,7 @@ func (e *exchange) HoldAuction(ctx context.Context, bidRequest *openrtb.BidReque
 	auctionCtx, cancel := e.makeAuctionContext(ctx, shouldCacheBids)
 	defer cancel()
 
-	adapterBids, adapterExtra := e.getAllBids(auctionCtx, cleanRequests, aliases, bidAdjustmentFactors, blabels)
+	adapterBids, adapterExtra := e.getAllBids(auctionCtx, cleanRequests, aliases, bidAdjustmentFactors, blabels, rateConverter)
 	auc := newAuction(adapterBids, len(bidRequest.Imp))
 	if targData != nil {
 		auc.setRoundedPrices(targData.priceGranularity)
@@ -157,7 +158,7 @@ func (e *exchange) makeAuctionContext(ctx context.Context, needsCache bool) (auc
 }
 
 // This piece sends all the requests to the bidder adapters and gathers the results.
-func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext.BidderName]*openrtb.BidRequest, aliases map[string]string, bidAdjustments map[string]float64, blabels map[openrtb_ext.BidderName]*pbsmetrics.AdapterLabels) (map[openrtb_ext.BidderName]*pbsOrtbSeatBid, map[openrtb_ext.BidderName]*seatResponseExtra) {
+func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext.BidderName]*openrtb.BidRequest, aliases map[string]string, bidAdjustments map[string]float64, blabels map[openrtb_ext.BidderName]*pbsmetrics.AdapterLabels, rateConverter *currencies.RateConverter) (map[openrtb_ext.BidderName]*pbsOrtbSeatBid, map[openrtb_ext.BidderName]*seatResponseExtra) {
 	// Set up pointers to the bid results
 	adapterBids := make(map[openrtb_ext.BidderName]*pbsOrtbSeatBid, len(cleanRequests))
 	adapterExtra := make(map[openrtb_ext.BidderName]*seatResponseExtra, len(cleanRequests))
@@ -166,7 +167,7 @@ func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext
 	for bidderName, req := range cleanRequests {
 		// Here we actually call the adapters and collect the bids.
 		coreBidder := resolveBidder(string(bidderName), aliases)
-		bidderRunner := recoverSafely(func(aName openrtb_ext.BidderName, coreBidder openrtb_ext.BidderName, request *openrtb.BidRequest, bidlabels *pbsmetrics.AdapterLabels) {
+		bidderRunner := recoverSafely(func(aName openrtb_ext.BidderName, coreBidder openrtb_ext.BidderName, request *openrtb.BidRequest, bidlabels *pbsmetrics.AdapterLabels, rateConverter *currencies.RateConverter) {
 			// Passing in aName so a doesn't change out from under the go routine
 			if bidlabels.Adapter == "" {
 				glog.Errorf("Exchange: bidlables for %s (%s) missing adapter string", aName, coreBidder)
@@ -184,7 +185,7 @@ func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext
 			if givenAdjustment, ok := bidAdjustments[string(aName)]; ok {
 				adjustmentFactor = givenAdjustment
 			}
-			bids, err := e.adapterMap[coreBidder].requestBid(ctx, request, aName, adjustmentFactor)
+			bids, err := e.adapterMap[coreBidder].requestBid(ctx, request, aName, adjustmentFactor, rateConverter)
 
 			// Add in time reporting
 			elapsed := time.Since(start)
@@ -214,7 +215,7 @@ func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext
 			}
 			chBids <- brw
 		}, chBids)
-		go bidderRunner(bidderName, coreBidder, req, blabels[coreBidder])
+		go bidderRunner(bidderName, coreBidder, req, blabels[coreBidder], rateConverter)
 	}
 	// Wait for the bidders to do their thing
 	for i := 0; i < len(cleanRequests); i++ {
@@ -226,8 +227,8 @@ func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext
 	return adapterBids, adapterExtra
 }
 
-func recoverSafely(inner func(openrtb_ext.BidderName, openrtb_ext.BidderName, *openrtb.BidRequest, *pbsmetrics.AdapterLabels), chBids chan *bidResponseWrapper) func(openrtb_ext.BidderName, openrtb_ext.BidderName, *openrtb.BidRequest, *pbsmetrics.AdapterLabels) {
-	return func(aName openrtb_ext.BidderName, coreBidder openrtb_ext.BidderName, request *openrtb.BidRequest, bidlabels *pbsmetrics.AdapterLabels) {
+func recoverSafely(inner func(openrtb_ext.BidderName, openrtb_ext.BidderName, *openrtb.BidRequest, *pbsmetrics.AdapterLabels, *currencies.RateConverter), chBids chan *bidResponseWrapper) func(openrtb_ext.BidderName, openrtb_ext.BidderName, *openrtb.BidRequest, *pbsmetrics.AdapterLabels, *currencies.RateConverter) {
+	return func(aName openrtb_ext.BidderName, coreBidder openrtb_ext.BidderName, request *openrtb.BidRequest, bidlabels *pbsmetrics.AdapterLabels, rateConverter *currencies.RateConverter) {
 		defer func() {
 			if r := recover(); r != nil {
 				glog.Errorf("OpenRTB auction recovered panic from Bidder %s: %v. Stack trace is: %v", coreBidder, r, string(debug.Stack()))
@@ -237,7 +238,7 @@ func recoverSafely(inner func(openrtb_ext.BidderName, openrtb_ext.BidderName, *o
 				chBids <- brw
 			}
 		}()
-		inner(aName, coreBidder, request, bidlabels)
+		inner(aName, coreBidder, request, bidlabels, rateConverter)
 	}
 }
 

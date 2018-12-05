@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/prebid/prebid-server/adapters"
+	"github.com/prebid/prebid-server/currencies"
 	"github.com/prebid/prebid-server/prebid_cache_client"
 
 	"github.com/buger/jsonparser"
@@ -82,8 +83,9 @@ func TestRaceIntegration(t *testing.T) {
 	}
 
 	theMetrics := pbsmetrics.NewMetrics(metrics.NewRegistry(), openrtb_ext.BidderList())
+	rateConverter := currencies.NewRateConverter(&http.Client{}, cfg.RatesConverter.FetchURL, time.Duration(cfg.RatesConverter.FetchIntervalSeconds)*time.Second)
 	ex := NewExchange(server.Client(), &wellBehavedCache{}, cfg, theMetrics, adapters.ParseBidderInfos("../static/bidder-info", openrtb_ext.BidderList()), gdpr.AlwaysAllow{})
-	_, err := ex.HoldAuction(context.Background(), newRaceCheckingRequest(t), &emptyUsersync{}, pbsmetrics.Labels{})
+	_, err := ex.HoldAuction(context.Background(), newRaceCheckingRequest(t), &emptyUsersync{}, pbsmetrics.Labels{}, rateConverter)
 	if err != nil {
 		t.Errorf("HoldAuction returned unexpected error: %v", err)
 	}
@@ -145,11 +147,11 @@ func newRaceCheckingRequest(t *testing.T) *openrtb.BidRequest {
 
 func TestPanicRecovery(t *testing.T) {
 	chBids := make(chan *bidResponseWrapper, 1)
-	panicker := func(aName openrtb_ext.BidderName, coreBidder openrtb_ext.BidderName, request *openrtb.BidRequest, bidlabels *pbsmetrics.AdapterLabels) {
+	panicker := func(aName openrtb_ext.BidderName, coreBidder openrtb_ext.BidderName, request *openrtb.BidRequest, bidlabels *pbsmetrics.AdapterLabels, rateConverter *currencies.RateConverter) {
 		panic("panic!")
 	}
 	recovered := recoverSafely(panicker, chBids)
-	recovered(openrtb_ext.BidderAppnexus, openrtb_ext.BidderAppnexus, nil, nil)
+	recovered(openrtb_ext.BidderAppnexus, openrtb_ext.BidderAppnexus, nil, nil, nil)
 }
 
 func buildImpExt(t *testing.T, jsonFilename string) json.RawMessage {
@@ -196,6 +198,8 @@ func TestPanicRecoveryHighLevel(t *testing.T) {
 	e.adapterMap[openrtb_ext.BidderBeachfront] = panicingAdapter{}
 	e.adapterMap[openrtb_ext.BidderAppnexus] = panicingAdapter{}
 
+	rateConverter := currencies.NewRateConverter(&http.Client{}, cfg.RatesConverter.FetchURL, time.Duration(cfg.RatesConverter.FetchIntervalSeconds)*time.Second)
+
 	request := &openrtb.BidRequest{
 		Site: &openrtb.Site{
 			Page:   "www.some.domain.com",
@@ -224,7 +228,7 @@ func TestPanicRecoveryHighLevel(t *testing.T) {
 		}},
 	}
 
-	_, err := e.HoldAuction(context.Background(), request, &emptyUsersync{}, pbsmetrics.Labels{})
+	_, err := e.HoldAuction(context.Background(), request, &emptyUsersync{}, pbsmetrics.Labels{}, rateConverter)
 	if err != nil {
 		t.Errorf("HoldAuction returned unexpected error: %v", err)
 	}
@@ -286,7 +290,8 @@ func runSpec(t *testing.T, filename string, spec *exchangeSpec) {
 	}
 	ex := newExchangeForTests(t, filename, spec.OutgoingRequests, aliases)
 	biddersInAuction := findBiddersInAuction(t, filename, &spec.IncomingRequest.OrtbRequest)
-	bid, err := ex.HoldAuction(context.Background(), &spec.IncomingRequest.OrtbRequest, mockIdFetcher(spec.IncomingRequest.Usersyncs), pbsmetrics.Labels{})
+	rateConverter := currencies.NewRateConverterDefault()
+	bid, err := ex.HoldAuction(context.Background(), &spec.IncomingRequest.OrtbRequest, mockIdFetcher(spec.IncomingRequest.Usersyncs), pbsmetrics.Labels{}, rateConverter)
 	responseTimes := extractResponseTimes(t, filename, bid)
 	for _, bidderName := range biddersInAuction {
 		if _, ok := responseTimes[bidderName]; !ok {
@@ -446,7 +451,7 @@ type validatingBidder struct {
 	mockResponses map[string]bidderResponse
 }
 
-func (b *validatingBidder) requestBid(ctx context.Context, request *openrtb.BidRequest, name openrtb_ext.BidderName, bidAdjustment float64) (seatBid *pbsOrtbSeatBid, errs []error) {
+func (b *validatingBidder) requestBid(ctx context.Context, request *openrtb.BidRequest, name openrtb_ext.BidderName, bidAdjustment float64, rateConverter *currencies.RateConverter) (seatBid *pbsOrtbSeatBid, errs []error) {
 	if expectedRequest, ok := b.expectations[string(name)]; ok {
 		if expectedRequest != nil {
 			if expectedRequest.BidAdjustment != bidAdjustment {
@@ -598,6 +603,6 @@ func (e *mockUsersync) GetId(bidder openrtb_ext.BidderName) (id string, exists b
 
 type panicingAdapter struct{}
 
-func (panicingAdapter) requestBid(ctx context.Context, request *openrtb.BidRequest, name openrtb_ext.BidderName, bidAdjustment float64) (posb *pbsOrtbSeatBid, errs []error) {
+func (panicingAdapter) requestBid(ctx context.Context, request *openrtb.BidRequest, name openrtb_ext.BidderName, bidAdjustment float64, rateConverter *currencies.RateConverter) (posb *pbsOrtbSeatBid, errs []error) {
 	panic("Panic! Panic! The world is ending!")
 }

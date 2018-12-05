@@ -46,9 +46,10 @@ func (r *Rates) UnmarshalJSON(b []byte) error {
 // GetRate returns the conversion rate between two currencies
 // returns an error in case the conversion rate between the two given currencies is not in the currencies rates map
 func (r *Rates) GetRate(from string, to string) (float64, error) {
+	var err error
 	if r.Conversions != nil {
 		if conversion, present := r.Conversions[from][to]; present == true {
-			return conversion, nil
+			return conversion, err
 		}
 		return 0, fmt.Errorf("conversion %s->%s not present in rates dictionnary", from, to)
 	}

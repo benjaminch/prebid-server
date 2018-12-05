@@ -18,6 +18,7 @@ import (
 	"github.com/mxmCherry/openrtb"
 	"github.com/prebid/prebid-server/analytics"
 	"github.com/prebid/prebid-server/config"
+	"github.com/prebid/prebid-server/currencies"
 	"github.com/prebid/prebid-server/exchange"
 	"github.com/prebid/prebid-server/openrtb_ext"
 	"github.com/prebid/prebid-server/pbsmetrics"
@@ -35,14 +36,14 @@ type AmpResponse struct {
 
 // NewAmpEndpoint modifies the OpenRTB endpoint to handle AMP requests. This will basically modify the parsing
 // of the request, and the return value, using the OpenRTB machinery to handle everything inbetween.
-func NewAmpEndpoint(ex exchange.Exchange, validator openrtb_ext.BidderParamValidator, requestsById stored_requests.Fetcher, cfg *config.Configuration, met pbsmetrics.MetricsEngine, pbsAnalytics analytics.PBSAnalyticsModule, disabledBidders map[string]string, defReqJSON []byte) (httprouter.Handle, error) {
+func NewAmpEndpoint(ex exchange.Exchange, validator openrtb_ext.BidderParamValidator, requestsById stored_requests.Fetcher, cfg *config.Configuration, met pbsmetrics.MetricsEngine, pbsAnalytics analytics.PBSAnalyticsModule, rateConverter *currencies.RateConverter, disabledBidders map[string]string, defReqJSON []byte) (httprouter.Handle, error) {
 	if ex == nil || validator == nil || requestsById == nil || cfg == nil || met == nil {
 		return nil, errors.New("NewAmpEndpoint requires non-nil arguments.")
 	}
 
 	defRequest := defReqJSON != nil && len(defReqJSON) > 0
 
-	return httprouter.Handle((&endpointDeps{ex, validator, requestsById, cfg, met, pbsAnalytics, disabledBidders, defRequest, defReqJSON}).AmpAuction), nil
+	return httprouter.Handle((&endpointDeps{ex, validator, requestsById, cfg, met, pbsAnalytics, rateConverter, disabledBidders, defRequest, defReqJSON}).AmpAuction), nil
 }
 
 func (deps *endpointDeps) AmpAuction(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
@@ -127,7 +128,7 @@ func (deps *endpointDeps) AmpAuction(w http.ResponseWriter, r *http.Request, _ h
 			labels.CookieFlag = pbsmetrics.CookieFlagYes
 		}
 	}
-	response, err := deps.ex.HoldAuction(ctx, req, usersyncs, labels)
+	response, err := deps.ex.HoldAuction(ctx, req, usersyncs, labels, deps.rateConverter)
 	ao.AuctionResponse = response
 
 	if err != nil {

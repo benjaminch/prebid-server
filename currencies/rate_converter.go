@@ -35,6 +35,11 @@ func NewRateConverter(
 	)
 }
 
+// NewRateConverterDefault returns a RateConverter with default values (not active)
+func NewRateConverterDefault() *RateConverter {
+	return NewRateConverter(&http.Client{}, "", time.Duration(0))
+}
+
 // NewRateConverterWithNotifier returns a new RateConverter
 // it allow to pass an update chan in which the number of ticks will be passed after each tick
 // allowing clients to listen on updates
@@ -155,6 +160,11 @@ func (rc *RateConverter) Rates() *Rates {
 		return rates.(*Rates)
 	}
 	return nil
+}
+
+// IsActive returns true if the rate converter is active, false otherwise
+func (rc *RateConverter) IsActive() bool {
+	return rc.fetchingInterval > time.Duration(0)
 }
 
 type httpClient interface {

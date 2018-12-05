@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prebid/prebid-server/currencies"
 	"github.com/prebid/prebid-server/gdpr"
 
 	"github.com/prebid/prebid-server/pbsmetrics"
@@ -89,7 +90,8 @@ func runTargetingAuction(t *testing.T, mockBids map[openrtb_ext.BidderName][]*op
 		req.Site = &openrtb.Site{}
 	}
 
-	bidResp, err := ex.HoldAuction(context.Background(), req, &mockFetcher{}, pbsmetrics.Labels{})
+	rateConverter := currencies.NewRateConverterDefault()
+	bidResp, err := ex.HoldAuction(context.Background(), req, &mockFetcher{}, pbsmetrics.Labels{}, rateConverter)
 
 	if err != nil {
 		t.Fatalf("Unexpected errors running auction: %v", err)
