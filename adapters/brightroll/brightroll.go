@@ -16,7 +16,7 @@ type BrightrollAdapter struct {
 	URI string
 }
 
-func (a *BrightrollAdapter) MakeRequests(requestIn *openrtb.BidRequest) ([]*adapters.RequestData, []error) {
+func (a *BrightrollAdapter) MakeRequests(requestIn *openrtb.BidRequest, reqInfo *adapters.ExtraRequestInfo) ([]*adapters.RequestData, []error) {
 
 	request := *requestIn
 	errs := make([]error, 0, len(request.Imp))
@@ -109,7 +109,9 @@ func (a *BrightrollAdapter) MakeRequests(requestIn *openrtb.BidRequest) ([]*adap
 		addHeaderIfNonEmpty(headers, "User-Agent", request.Device.UA)
 		addHeaderIfNonEmpty(headers, "X-Forwarded-For", request.Device.IP)
 		addHeaderIfNonEmpty(headers, "Accept-Language", request.Device.Language)
-		addHeaderIfNonEmpty(headers, "DNT", strconv.Itoa(int(request.Device.DNT)))
+		if request.Device.DNT != nil {
+			addHeaderIfNonEmpty(headers, "DNT", strconv.Itoa(int(*request.Device.DNT)))
+		}
 	}
 
 	return []*adapters.RequestData{{

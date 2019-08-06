@@ -3,11 +3,13 @@ package beachfront
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"github.com/prebid/prebid-server/errortypes"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/prebid/prebid-server/adapters"
-	"github.com/prebid/prebid-server/errortypes"
 	"github.com/prebid/prebid-server/openrtb_ext"
 
 	"github.com/mxmCherry/openrtb"
@@ -16,13 +18,13 @@ import (
 const Seat = "beachfront"
 const BidCapacity = 5
 
-const BannerEndpoint = "http://display.bfmio.com/prebid_display"
+const BannerEndpoint = "https://display.bfmio.com/prebid_display"
 const VideoEndpoint = "https://reachms.bfmio.com/bid.json?exchange_id="
 
 const VideoEndpointSuffix = "&prebidserver"
 
 const beachfrontAdapterName = "BF_PREBID_S2S"
-const beachfrontAdapterVersion = "0.2.2"
+const beachfrontAdapterVersion = "0.3.0"
 
 type BeachfrontAdapter struct {
 }
@@ -136,11 +138,11 @@ func getEndpoint(request *openrtb.BidRequest) (uri string) {
 	return BannerEndpoint
 }
 
-func (a *BeachfrontAdapter) MakeRequests(request *openrtb.BidRequest) ([]*adapters.RequestData, []error) {
+func (a *BeachfrontAdapter) MakeRequests(request *openrtb.BidRequest, reqInfo *adapters.ExtraRequestInfo) ([]*adapters.RequestData, []error) {
 	var beachfrontRequests BeachfrontRequests
 	var reqJSON []byte
 	var uri string
-	var errs = make([]error, 0)
+	var errs = make([]error, 0, len(request.Imp))
 	var err error
 	var imps int
 
@@ -148,7 +150,6 @@ func (a *BeachfrontAdapter) MakeRequests(request *openrtb.BidRequest) ([]*adapte
 
 	beachfrontRequests, errs, imps = preprocess(request, uri)
 
-	// These are fatal errors -------------
 	if uri == VideoEndpoint {
 		reqJSON, err = json.Marshal(beachfrontRequests.Video)
 		uri = uri + beachfrontRequests.Video.AppId + VideoEndpointSuffix
@@ -174,6 +175,15 @@ func (a *BeachfrontAdapter) MakeRequests(request *openrtb.BidRequest) ([]*adapte
 	headers := http.Header{}
 	headers.Add("Content-Type", "application/json;charset=utf-8")
 	headers.Add("Accept", "application/json")
+
+	if request.Device != nil {
+		addHeaderIfNonEmpty(headers, "User-Agent", request.Device.UA)
+		addHeaderIfNonEmpty(headers, "X-Forwarded-For", request.Device.IP)
+		addHeaderIfNonEmpty(headers, "Accept-Language", request.Device.Language)
+		if request.Device.DNT != nil {
+			addHeaderIfNonEmpty(headers, "DNT", strconv.Itoa(int(*request.Device.DNT)))
+		}
+	}
 
 	return []*adapters.RequestData{{
 		Method:  "POST",
@@ -241,7 +251,9 @@ func getBannerRequest(req *openrtb.BidRequest) (BeachfrontBannerRequest, []error
 				beachfrontReq.IP = req.Device.IP
 				beachfrontReq.DeviceModel = req.Device.Model
 				beachfrontReq.DeviceOs = req.Device.OS
-				beachfrontReq.Dnt = req.Device.DNT
+				if req.Device.DNT != nil {
+					beachfrontReq.Dnt = *req.Device.DNT
+				}
 				if req.Device.UA != "" {
 					beachfrontReq.UA = req.Device.UA
 				}
@@ -286,9 +298,6 @@ func getBannerRequest(req *openrtb.BidRequest) (BeachfrontBannerRequest, []error
 	return beachfrontReq, errs, imps
 }
 
-/*
-Prepare the request that has been received from Prebid.js, translating it to the beachfront format
-*/
 func getVideoRequest(req *openrtb.BidRequest) (BeachfrontVideoRequest, []error, int) {
 	var videoImpsIndex = 0
 	var beachfrontReq = NewBeachfrontVideoRequest()
@@ -322,7 +331,7 @@ func getVideoRequest(req *openrtb.BidRequest) (BeachfrontVideoRequest, []error, 
 		The req could contain banner,audio,native and video imps when It arrives here. I am only
 		interested in video
 
-		The beach front video endpoint is only capable of returning a single nurl and price, wrapped in
+		The beachfront video endpoint is only capable of returning a single nurl and price, wrapped in
 		an openrtb format, so even though I'm building a request here that will include multiple video
 		impressions, only a single URL will be returned. Hopefully the beachfront endpoint can be modified
 		in the future to return multiple video ads
@@ -392,26 +401,33 @@ func getVideoRequest(req *openrtb.BidRequest) (BeachfrontVideoRequest, []error, 
 func (a *BeachfrontAdapter) MakeBids(internalRequest *openrtb.BidRequest, externalRequest *adapters.RequestData, response *adapters.ResponseData) (*adapters.BidderResponse, []error) {
 	var bids []openrtb.Bid
 	var bidtype = getBidType(internalRequest)
-	// Silly name to avoid a collision which will probably never amount to more than annoying highlighting
-	// in my IDE...
-	var errorz = make([]error, 0)
+
+	/*
+		Beachfront is now sending an empty array and 200 as their "no results" response. This should catch that.
+	*/
+
+	if response.StatusCode == http.StatusOK && len(response.Body) <= 2 {
+		return nil, nil
+	}
+
+	if response.StatusCode == http.StatusNoContent {
+		return nil, nil
+	}
+
+	if response.StatusCode == http.StatusBadRequest {
+		return nil, []error{&errortypes.BadInput{
+			Message: fmt.Sprintf("Unexpected status code: %d. Run with request.debug = 1 for more info", response.StatusCode),
+		}}
+	}
+
+	if response.StatusCode != http.StatusOK {
+		return nil, []error{fmt.Errorf("Unexpected status code: %d. Run with request.debug = 1 for more info", response.StatusCode)}
+	}
 
 	bids, errs := postprocess(response, externalRequest, internalRequest.ID, bidtype)
 
 	if len(errs) != 0 {
-		errorz = append(errorz, errs...)
-		bfmMessage := "Failed to process the beachfront response"
-
-		if len(response.Body) == 0 {
-			bfmMessage = "Received a null response from beachfront"
-		}
-
-		err := &errortypes.BadServerResponse{
-			Message: bfmMessage,
-		}
-
-		errorz = append(errorz, err)
-		return nil, errorz
+		return nil, errs
 	}
 
 	bidResponse := adapters.NewBidderResponseWithBidsCapacity(BidCapacity)
@@ -423,7 +439,7 @@ func (a *BeachfrontAdapter) MakeBids(internalRequest *openrtb.BidRequest, extern
 		})
 	}
 
-	return bidResponse, errorz
+	return bidResponse, errs
 }
 
 func postprocess(response *adapters.ResponseData, externalRequest *adapters.RequestData, id string, bidtype openrtb_ext.BidType) ([]openrtb.Bid, []error) {
@@ -509,6 +525,13 @@ func getBidType(internal *openrtb.BidRequest) openrtb_ext.BidType {
 func extractVideoCrid(nurl string) string {
 	chunky := strings.SplitAfter(nurl, ":")
 	return strings.TrimSuffix(chunky[2], ":")
+}
+
+// Thank you, brightroll.
+func addHeaderIfNonEmpty(headers http.Header, headerName string, headerValue string) {
+	if len(headerValue) > 0 {
+		headers.Add(headerName, headerValue)
+	}
 }
 
 func NewBeachfrontBidder() *BeachfrontAdapter {
