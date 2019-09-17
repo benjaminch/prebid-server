@@ -24,12 +24,10 @@ import (
 // See issue #559
 var Rev string
 
-func init() {
+func main() {
 	rand.Seed(time.Now().UnixNano())
 	flag.Parse() // read glog settings from cmd line
-}
-
-func main() {
+	
 	v := viper.New()
 	config.SetupViper(v, "pbs")
 	cfg, err := config.New(v)
