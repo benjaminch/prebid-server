@@ -18,7 +18,7 @@ For more information, see:
 
 ## Installation
 
-First install [Go 1.11](https://golang.org/doc/install) or later and [dep](https://golang.github.io/dep/docs/installation.html). Note that dep requires an explicit GOPATH to be set.
+First install [Go 1.12](https://golang.org/doc/install) or later and [dep](https://golang.github.io/dep/docs/installation.html). Note that dep requires an explicit GOPATH to be set.
 
 ```bash
 export GOPATH=$(go env GOPATH)
