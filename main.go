@@ -16,7 +16,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Holds binary revision string
+// Rev holds binary revision string
 // Set manually at build time using:
 //    go build -ldflags "-X main.Rev=`git rev-parse --short HEAD`"
 // Populated automatically at build / release time via .travis.yml
@@ -26,34 +26,42 @@ var Rev string
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
-	flag.Parse() // read glog settings from cmd line
 }
 
 func main() {
-	v := viper.New()
-	config.SetupViper(v, "pbs")
-	cfg, err := config.New(v)
+	flag.Parse() // required for glog flags and testing package flags
+
+	cfg, err := loadConfig()
 	if err != nil {
 		glog.Fatalf("Configuration could not be loaded or did not pass validation: %v", err)
 	}
-	if err := serve(Rev, cfg); err != nil {
+
+	err = serve(Rev, cfg)
+	if err != nil {
 		glog.Errorf("prebid-server failed: %v", err)
 	}
 }
 
-func serve(revision string, cfg *config.Configuration) error {
+func loadConfig() (*config.Configuration, error) {
+	v := viper.New()
+	config.SetupViper(v, "pbs") // filke = filename
+	return config.New(v)
+}
 
-	currencyConverter := currencies.NewRateConverter(&http.Client{}, cfg.CurrencyConverter.FetchURL, time.Duration(cfg.CurrencyConverter.FetchIntervalSeconds)*time.Second)
+func serve(revision string, cfg *config.Configuration) error {
+	fetchingInterval := time.Duration(cfg.CurrencyConverter.FetchIntervalSeconds) * time.Second
+	currencyConverter := currencies.NewRateConverter(&http.Client{}, cfg.CurrencyConverter.FetchURL, fetchingInterval)
 
 	r, err := router.New(cfg, currencyConverter)
 	if err != nil {
 		return err
 	}
-	// Init prebid cache
+
 	pbc.InitPrebidCache(cfg.CacheURL.GetBaseURL())
-	// Add cors support
+
 	corsRouter := router.SupportCORS(r)
 	server.Listen(cfg, router.NoCache{Handler: corsRouter}, router.Admin(revision, currencyConverter), r.MetricsEngine)
+
 	r.Shutdown()
 	return nil
 }
